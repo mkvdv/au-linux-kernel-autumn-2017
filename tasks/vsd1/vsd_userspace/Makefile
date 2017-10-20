@@ -1,8 +1,9 @@
 INCLUDE_PATH=../vsd_driver/
 include ../config.mk
+CFLAGS+=-Wall -Werror -Wextra -pedantic
 
 vsd_userspace: main.c $(INCLUDE_PATH)/vsd_ioctl.h
-	gcc $< -I$(INCLUDE_PATH) -o $@
+	gcc $(CFLAGS) $< -I$(INCLUDE_PATH) -o $@
 	cp $@ $(VM_SHARE_PATH)
 
 .PHONY: clean

@@ -1,4 +1,5 @@
 MOD_NAME := vsd_driver
+subdir-ccflags-y := -Wall -Werror -Wextra -Wno-unused
 
 ifneq ($(KERNELRELEASE),)
 	obj-m := $(MOD_NAME).o
