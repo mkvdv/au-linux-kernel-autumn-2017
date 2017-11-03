@@ -8,8 +8,8 @@
 
 #define TEST(assertion) \
     if (!(assertion)) { \
-        fprintf(stderr, "%s %d\n", __FILE__, __LINE__); \
-        perror("Test failed"); \
+        fprintf(stderr, "%s %d\t", __FILE__, __LINE__); \
+        perror("Test failed\n"); \
         abort(); \
     }
 
@@ -20,7 +20,7 @@ static void run_one_test(off_t vsd_offset, size_t vsd_size) {
         vsd_rw_buf[i] = i % 255;
     }
 
-    TEST(vsd_write(vsd_rw_buf, vsd_offset, vsd_size) == vsd_size);
+    TEST(vsd_write((char *) vsd_rw_buf, vsd_offset, vsd_size) == (ssize_t) vsd_size);
 
     char* vsd_mem = vsd_mmap(vsd_offset);
     TEST(vsd_mem);
@@ -29,7 +29,7 @@ static void run_one_test(off_t vsd_offset, size_t vsd_size) {
     TEST(!memcmp(vsd_rw_buf, vsd_mem, vsd_size));
     // Check in opposite direction
     vsd_mem[10] = ~vsd_mem[10];
-    TEST(vsd_read(vsd_rw_buf, vsd_offset, vsd_size) == vsd_size);
+    TEST(vsd_read((char *) vsd_rw_buf, vsd_offset, vsd_size) == (ssize_t) vsd_size);
     TEST(!memcmp(vsd_rw_buf, vsd_mem, vsd_size));
 
     // While we are mapped vsd, its size can't be changed

@@ -23,6 +23,8 @@ typedef struct vsd_dev {
 } vsd_dev_t;
 static vsd_dev_t *vsd_dev;
 
+static uint32_t vsd_mmapped_counter;
+
 static int vsd_dev_open(struct inode *inode, struct file *filp)
 {
     pr_notice(LOG_TAG "opened\n");
@@ -108,7 +110,7 @@ static long vsd_ioctl_get_size(vsd_ioctl_get_size_arg_t __user *uarg)
 static long vsd_ioctl_set_size(vsd_ioctl_set_size_arg_t __user *uarg)
 {
     vsd_ioctl_set_size_arg_t arg;
-    if (0 /* TODO device is currently mapped */)
+    if (vsd_mmapped_counter)
         return -EBUSY;
 
     if (copy_from_user(&arg, uarg, sizeof(arg)))
@@ -135,7 +137,23 @@ static long vsd_dev_ioctl(struct file *filp, unsigned int cmd,
     }
 }
 
-static struct vm_operations_struct vsd_dev_vma_ops = {};
+void vma_open(struct vm_area_struct *vma)
+{
+    printk(KERN_NOTICE "VMA open, virt %lx, phys %lx\n",
+            vma->vm_start, vma->vm_pgoff << PAGE_SHIFT);
+    ++vsd_mmapped_counter;
+}
+
+void vma_close(struct vm_area_struct *vma)
+{
+    printk(KERN_NOTICE "VMA close.\n");
+    --vsd_mmapped_counter;
+}
+
+static struct vm_operations_struct vsd_dev_vma_ops = {
+    .open =  vma_open,
+    .close = vma_close,
+};
 
 static int map_vmalloc_range(struct vm_area_struct *uvma, void *kaddr, size_t size)
 {
@@ -153,6 +171,22 @@ static int map_vmalloc_range(struct vm_area_struct *uvma, void *kaddr, size_t si
      * Use vmalloc_to_page and vm_insert_page functions for this.
      */
     // TODO
+
+    while (size) {
+        struct page *page = vmalloc_to_page(kaddr);
+        int rc;
+        if (!page) {
+            return -EINVAL;
+        }
+        rc = vm_insert_page(uvma, uaddr, page);
+        if (rc < 0) {
+            return rc;
+        }
+
+        uaddr += PAGE_SIZE;
+        kaddr += PAGE_SIZE;
+        size -= PAGE_SIZE; // aligned
+    }
 
     uvma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
     return 0;
@@ -177,6 +211,8 @@ static int vsd_dev_mmap(struct file *filp, struct vm_area_struct *vma)
 
     vma->vm_ops = &vsd_dev_vma_ops;
 
+    ++vsd_mmapped_counter;
+
     return 0;
 }
 
@@ -187,7 +223,8 @@ static struct file_operations vsd_dev_fops = {
     .read = vsd_dev_read,
     .write = vsd_dev_write,
     .llseek = vsd_dev_llseek,
-    .unlocked_ioctl = vsd_dev_ioctl
+    .unlocked_ioctl = vsd_dev_ioctl,
+    .mmap = vsd_dev_mmap
 };
 
 #undef LOG_TAG
