@@ -55,33 +55,54 @@ static vsd_plat_device_t dev = {
 };
 
 static ssize_t vsd_dev_read(char *dst, size_t dst_size, size_t offset) {
-    (void)dst;
-    (void)dst_size;
-    (void)offset;
     // TODO
-    return -EINVAL;
+    void* res;
+
+    pr_notice(LOG_TAG "vsd_dev_read\n");
+
+    res = memcpy(dst, dev.vbuf + offset, dst_size);
+    if (res != dst){
+        return -ENOMEM;
+    }
+    return dst_size;
 }
 
 static ssize_t vsd_dev_write(char *src, size_t src_size, size_t offset) {
-    (void)src;
-    (void)src_size;
-    (void)offset;
     // TODO
-    return -EINVAL;
+    void* res;
+    void* buf;
+
+    pr_notice(LOG_TAG "vsd_dev_write\n");
+
+    buf = dev.vbuf + offset;
+    res = memcpy(buf, src, src_size);
+    if (res != buf) {
+        return -ENOMEM; 
+    }
+    return src_size;
 }
 
-static void vsd_dev_set_size(size_t size)
+static ssize_t vsd_dev_set_size(size_t size)
 {
-    (void)size;
     // TODO
+    pr_notice(LOG_TAG "vsd_dev_set_size\n");
+    if (size <= dev.buf_size) {
+        dev.hwregs->dev_size = size;
+        return 0;
+    } else {
+        return -EINVAL;
+    }
 }
 
 static int vsd_dev_cmd_poll_kthread_func(void *data)
 {
     ssize_t ret = 0;
+    uint8_t last_cmd;
+    pr_notice(LOG_TAG "vsd_dev_cmd_poll_kthread_func\n");
     while(!kthread_should_stop()) {
         mb();
-        switch(dev.hwregs->cmd) {
+        last_cmd = dev.hwregs->cmd;
+        switch(last_cmd) {
             case VSD_CMD_READ:
                 ret = vsd_dev_read(
                         phys_to_virt((phys_addr_t)dev.hwregs->dma_paddr),
@@ -97,11 +118,20 @@ static int vsd_dev_cmd_poll_kthread_func(void *data)
                 );
                 break;
             case VSD_CMD_SET_SIZE:
-                vsd_dev_set_size((size_t)dev.hwregs->dev_offset);
+                ret = vsd_dev_set_size((size_t)dev.hwregs->dev_offset);
                 break;
         }
 
         // TODO notify vsd_driver about finished cmd
+        if (last_cmd != VSD_CMD_NONE) {
+            pr_notice(LOG_TAG "vsd_dev_cmd_poll_kthread_func cmd = %d, res = %d\n", dev.hwregs->cmd, dev.hwregs->result);
+            dev.hwregs->result = ret;
+            wmb();
+            dev.hwregs->cmd = VSD_CMD_NONE;
+            ret = 0;
+            tasklet_schedule((struct tasklet_struct *) dev.hwregs->tasklet_vaddr);    
+        }
+        
         // Sleep one sec not to waste CPU on polling
         ssleep(1);
     }
@@ -112,6 +142,8 @@ static int vsd_dev_cmd_poll_kthread_func(void *data)
 static int __init vsd_dev_module_init(void)
 {
     int ret = 0;
+    pr_notice(LOG_TAG "vsd_dev_module_init\n");
+    
 
     dev.hwregs = kmalloc(sizeof(*dev.hwregs), GFP_KERNEL);
     if (!dev.hwregs) {

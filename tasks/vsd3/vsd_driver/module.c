@@ -27,6 +27,9 @@ typedef struct vsd_dev {
 } vsd_dev_t;
 static vsd_dev_t *vsd_dev;
 
+DEFINE_MUTEX(vsd_dev_mutex);
+DECLARE_WAIT_QUEUE_HEAD(vsd_dev_waiting_completion_queue);
+
 #define LOCAL_DEBUG 0
 static void print_vsd_dev_hw_regs(vsd_dev_t *vsd_dev)
 {
@@ -65,30 +68,101 @@ static int vsd_dev_release(struct inode *inode, struct file *filp)
 
 static void vsd_dev_dma_op_complete_tsk_func(unsigned long unused)
 {
+    pr_notice(LOG_TAG "vsd_dev_dma_op_complete_tsk_func\n");
     (void)unused;
     // TODO wake up thread waiting for VSD cmd completion
+    wake_up(&vsd_dev_waiting_completion_queue);
 }
 
 static ssize_t vsd_dev_read(struct file *filp,
     char __user *read_user_buf, size_t read_size, loff_t *fpos)
 {
-    (void)filp;
-    (void)read_user_buf;
-    (void)read_size;
-    (void)fpos;
     // TODO
-    return -EINVAL;
+    char* buf;
+    ssize_t res;
+
+    pr_notice(LOG_TAG "vsd_dev_read\n");
+    mutex_lock(&vsd_dev_mutex);
+
+    if (*fpos >= vsd_dev->hwregs->dev_size) {
+        mutex_unlock(&vsd_dev_mutex);
+        return 0;
+    }
+    
+    if (*fpos + read_size >= vsd_dev->hwregs->dev_size)
+        read_size = vsd_dev->hwregs->dev_size - *fpos;
+
+    buf = kmalloc(read_size, GFP_KERNEL);
+    if (!buf) {
+        mutex_unlock(&vsd_dev_mutex);
+        return -ENOMEM;
+    }
+
+    vsd_dev->hwregs->dev_offset = (uint64_t) *fpos;
+    vsd_dev->hwregs->dma_paddr = (uint64_t) virt_to_phys(buf);
+    vsd_dev->hwregs->dma_size = read_size;
+    vsd_dev->hwregs->tasklet_vaddr = (uint64_t) &vsd_dev->dma_op_complete_tsk;
+    wmb(); // cmd = VSD_CMD_SET_SIZE will run device's cmd_pool function
+    vsd_dev->hwregs->cmd = VSD_CMD_READ;
+    
+    wait_event(vsd_dev_waiting_completion_queue, vsd_dev->hwregs->cmd == VSD_CMD_NONE);
+
+    res = vsd_dev->hwregs->result;
+    mutex_unlock(&vsd_dev_mutex);
+
+    if (copy_to_user(read_user_buf, buf, read_size))
+        return -EFAULT;
+    kfree(buf);
+
+    *fpos += read_size;
+    return res;
 }
 
 static ssize_t vsd_dev_write(struct file *filp,
     const char __user *write_user_buf, size_t write_size, loff_t *fpos)
 {
-    (void)filp;
-    (void)write_user_buf;
-    (void)write_size;
-    (void)fpos;
     // TODO
-    return -EINVAL;
+    ssize_t res;
+    void* buf;
+
+    pr_notice(LOG_TAG "vsd_dev_write\n");
+    mutex_lock(&vsd_dev_mutex);
+
+    if (*fpos >= vsd_dev->hwregs->dev_size){
+        mutex_unlock(&vsd_dev_mutex);
+        return -EINVAL;
+    }
+
+    if (*fpos + write_size >= vsd_dev->hwregs->dev_size)
+        write_size = vsd_dev->hwregs->dev_size - *fpos;
+
+    buf = kmalloc(write_size, GFP_KERNEL);
+    if (!buf) {
+        mutex_unlock(&vsd_dev_mutex);
+        return -ENOMEM;
+    }
+
+    if (copy_from_user(buf, write_user_buf, write_size)){
+        mutex_unlock(&vsd_dev_mutex);
+        return -EFAULT;
+    }
+
+    vsd_dev->hwregs->dev_offset = (uint64_t) *fpos;
+    vsd_dev->hwregs->dma_paddr = (uint64_t) virt_to_phys(buf);
+    vsd_dev->hwregs->dma_size = write_size;
+    vsd_dev->hwregs->tasklet_vaddr = (uint64_t) &vsd_dev->dma_op_complete_tsk;
+    wmb();
+    vsd_dev->hwregs->cmd = VSD_CMD_WRITE;
+
+    pr_notice(LOG_TAG "vsd_dev_write wait device\n");
+    wait_event(vsd_dev_waiting_completion_queue, vsd_dev->hwregs->cmd == VSD_CMD_NONE);
+
+    res = vsd_dev->hwregs->result;
+    mutex_unlock(&vsd_dev_mutex);
+
+    kfree(buf);
+    *fpos += write_size;
+    return res;
 }
 
 static loff_t vsd_dev_llseek(struct file *filp, loff_t off, int whence)
@@ -119,6 +193,8 @@ static loff_t vsd_dev_llseek(struct file *filp, loff_t off, int whence)
 static long vsd_ioctl_get_size(vsd_ioctl_get_size_arg_t __user *uarg)
 {
     vsd_ioctl_get_size_arg_t arg;
+
+    pr_notice(LOG_TAG "vsd_ioctl_get_size\n");
     if (copy_from_user(&arg, uarg, sizeof(arg)))
         return -EFAULT;
 
@@ -132,13 +208,32 @@ static long vsd_ioctl_get_size(vsd_ioctl_get_size_arg_t __user *uarg)
 static long vsd_ioctl_set_size(vsd_ioctl_set_size_arg_t __user *uarg)
 {
     // TODO
-    (void)uarg;
-    return -EINVAL;
+    long res;
+    vsd_ioctl_set_size_arg_t arg;
+
+    pr_notice(LOG_TAG "vsd_ioctl_set_size\n");
+    if (copy_from_user(&arg, uarg, sizeof(arg)))
+        return -EFAULT;
+
+    mutex_lock(&vsd_dev_mutex);
+
+    vsd_dev->hwregs->dev_offset = arg.size;
+    vsd_dev->hwregs->tasklet_vaddr = (uint64_t) &vsd_dev->dma_op_complete_tsk;
+    wmb();
+    vsd_dev->hwregs->cmd = VSD_CMD_SET_SIZE;
+
+    wait_event(vsd_dev_waiting_completion_queue, vsd_dev->hwregs->cmd == VSD_CMD_NONE);
+
+    res = vsd_dev->hwregs->result;
+    mutex_unlock(&vsd_dev_mutex);
+
+    return res;
 }
 
 static long vsd_dev_ioctl(struct file *filp, unsigned int cmd,
         unsigned long arg)
 {
+    pr_notice(LOG_TAG "vsd_dev_ioctl\n");
     switch(cmd) {
         case VSD_IOCTL_GET_SIZE:
             return vsd_ioctl_get_size((vsd_ioctl_get_size_arg_t __user*)arg);
